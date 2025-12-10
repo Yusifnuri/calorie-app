@@ -18,9 +18,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT_DIR / "src"
 sys.path.append(str(SRC_DIR))
 
-from predict import predict_dish_and_nutrition  # noqa: E402
-from genai_explainer import generate_explanation  # noqa: E402
-from calories import NUTRITION_TABLE  # noqa: E402
+from predict import predict_dish_and_nutrition 
+from src.genai_explainer import generate_explanation
+from calories import NUTRITION_TABLE 
 
 
 st.set_page_config(page_title="FoodVisionAI - Azerbaijani Cuisine", page_icon="🍽️")
@@ -38,7 +38,7 @@ Upload an image of an Azerbaijani dish and the app will:
     """
 )
 
-# Sidebar: user profile + AI toggle (personalised recommendations + cost control)
+# Sidebar: user profile + AI 
 with st.sidebar:
     st.header("User profile (optional)")
 
