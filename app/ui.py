@@ -21,7 +21,6 @@ sys.path.append(str(SRC_DIR))
 from predict import predict_dish_and_nutrition
 from genai_explainer import generate_explanation
 from calories import NUTRITION_TABLE
- 
 
 
 st.set_page_config(page_title="FoodVisionAI - Azerbaijani Cuisine", page_icon="🍽️")
@@ -39,7 +38,7 @@ Upload an image of an Azerbaijani dish and the app will:
     """
 )
 
-# Sidebar: user profile + AI 
+# Sidebar: user profile + AI
 with st.sidebar:
     st.header("User profile (optional)")
 
@@ -64,6 +63,13 @@ with st.sidebar:
         value=True,
     )
 
+# Build profile once so we can use it in both normal and low-confidence cases
+profile = {
+    "goal": goal,
+    "activity": activity,
+    "diet_preference": diet_pref,
+}
+
 uploaded_image = st.file_uploader("Upload a food image", type=["jpg", "jpeg", "png"])
 
 if uploaded_image is not None:
@@ -73,11 +79,60 @@ if uploaded_image is not None:
     with st.spinner("Analyzing image with FoodVisionAI..."):
         result = predict_dish_and_nutrition(img)
 
+    # Extract prediction results
     dish = result["dish"]
     confidence = result["confidence"]
     nutrition = result["nutrition"]
-    top_candidates = result.get("top_candidates", [{"dish": dish, "confidence": confidence}])
-    all_classes = result.get("all_classes", [dish])
+    top_candidates = result.get("top_candidates", [])
+    all_classes = result.get("all_classes", [])
+
+    # ---------------------------------------------------------
+    # CASE 1: The model is NOT confident enough
+    # ---------------------------------------------------------
+    if dish is None:
+        st.subheader("Model prediction")
+        st.error("The model could not confidently identify any dish in the image.")
+        st.info(f"Confidence score of the best guess: {confidence * 100:.2f}% (below threshold)")
+
+        # Show the top candidates so the user sees what the model roughly considered
+        if top_candidates:
+            st.write("Top candidates (low confidence):")
+            for c in top_candidates:
+                st.write(f"- {c['dish']} ({c['confidence'] * 100:.1f}%)")
+
+        # Allow the user to manually enter the dish name
+        st.subheader("Manual dish input")
+        manual_name = st.text_input(
+           "If you know the dish name, you can enter it manually:"
+        )
+
+        # Optional: AI explanation even in low-confidence case
+        if manual_name and use_ai_explanation:
+            with st.spinner("Generating AI explanation based on your input..."):
+                explanation = generate_explanation(
+                    manual_name,
+                    None,          # no reliable nutrition estimate from the model
+                    profile=profile,
+                )
+            st.write(explanation)
+        elif manual_name and not use_ai_explanation:
+            st.info(
+                "AI explanation is disabled (speed/cost optimisation). "
+                "Enable it in the sidebar if you want a personalised analysis."
+            )
+
+        # Stop the rest of the UI flow since we don't trust the prediction
+        st.stop()
+
+    # ---------------------------------------------------------
+    # CASE 2: Model is confident enough → normal flow
+    # ---------------------------------------------------------
+
+    # Fallbacks if keys are missing
+    if not top_candidates:
+        top_candidates = [{"dish": dish, "confidence": confidence}]
+    if not all_classes:
+        all_classes = [dish]
 
     # ---- Prediction summary ----
     st.subheader("Model prediction")
@@ -163,12 +218,6 @@ if uploaded_image is not None:
 
     # ---- AI-based personalised explanation ----
     st.subheader("AI Nutrition Analysis")
-
-    profile = {
-        "goal": goal,
-        "activity": activity,
-        "diet_preference": diet_pref,
-    }
 
     if use_ai_explanation:
         with st.spinner("Generating AI explanation..."):

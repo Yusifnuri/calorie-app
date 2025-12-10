@@ -18,6 +18,8 @@ from PIL import Image
 
 from calories import NUTRITION_TABLE
 
+CONFIDENCE_THRESHOLD = 0.40  # When model less than confident 40% give a response "I dont Know"
+
 DEVICE = torch.device(
     "mps" if torch.backends.mps.is_available()
     else "cuda" if torch.cuda.is_available()
@@ -88,24 +90,15 @@ def predict_dish_and_nutrition(
     """
     Main prediction function.
 
-    Parameters
-    ----------
-    image
-        Path to image file or PIL.Image.
-    checkpoint_path
-        Optional override for model checkpoint path.
-    top_k
-        Number of top candidate dishes to return.
-
-    Returns
-    -------
-    dict with keys:
-        - dish: str (top-1 prediction)
+    Returns a dict:
+        - dish: str | None
         - confidence: float
-        - nutrition: dict with calories, fat, carbs, protein (numeric)
+        - nutrition: dict | None
         - top_candidates: list of {dish, confidence}
-        - all_classes: list of str (all dish classes known by the model)
+        - all_classes: list of class names
     """
+
+    # Load checkpoint
     if checkpoint_path is None:
         checkpoint_path = DEFAULT_CHECKPOINT
     else:
@@ -114,20 +107,25 @@ def predict_dish_and_nutrition(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {checkpoint_path}")
 
+    # Load model and class names
     model, class_names = load_model(checkpoint_path)
 
+    # Preprocess image
     input_tensor = preprocess_image(image).to(DEVICE)
 
     with torch.no_grad():
         outputs = model(input_tensor)
         probs = torch.softmax(outputs, dim=1)[0]
+
+        # Top-1 predicted class
         pred_idx = int(torch.argmax(probs))
         pred_class = class_names[pred_idx]
         confidence = float(probs[pred_idx])
 
-        # top-k candidates for extended features (multiple-food / correction)
+        # Top-k candidates for UI suggestions or correction
         k = min(top_k, len(class_names))
         top_values, top_indices = torch.topk(probs, k=k)
+
         top_candidates = []
         for score, idx in zip(top_values, top_indices):
             idx = int(idx)
@@ -138,6 +136,17 @@ def predict_dish_and_nutrition(
                 }
             )
 
+    # If confidence is too low → return unknown result
+    if confidence < CONFIDENCE_THRESHOLD:
+        return {
+            "dish": None,
+            "confidence": confidence,
+            "nutrition": None,
+            "top_candidates": top_candidates,
+            "all_classes": class_names,
+        }
+
+    # Retrieve nutrition info
     if pred_class not in NUTRITION_TABLE:
         raise KeyError(f"No nutrition info available for predicted dish: {pred_class}")
 
