@@ -4,7 +4,7 @@
 #  - uploading an image
 #  - predicting Azerbaijani dish
 #  - showing nutritional values
-#  - multiple-food selection & portion-size estimation
+#  - multiple-food selection & portion-size estimation (grams)
 #  - AI-based personalised nutrition explanation
 
 import sys
@@ -15,13 +15,12 @@ from PIL import Image
 
 # Make sure we can import from src/
 ROOT_DIR = Path(__file__).resolve().parent.parent
-SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+SRC_DIR = ROOT_DIR / "src"
 sys.path.append(str(SRC_DIR))
 
-from predict import predict_dish_and_nutrition
+from predict import predict_dish_and_nutrition, compute_multi_nutrition
 from genai_explainer import generate_explanation
-from calories import NUTRITION_TABLE
-
+from calories import NUTRITION_TABLE, get_portion_grams
 
 st.set_page_config(page_title="FoodVisionAI - Azerbaijani Cuisine", page_icon="🍽️")
 
@@ -33,7 +32,7 @@ Upload an image of an Azerbaijani dish and the app will:
 
 1. Recognize the dish using a fine-tuned EfficientNet-B0 model  
 2. Estimate its nutritional values (calories, fat, carbs, protein)  
-3. Let you correct or refine the detection (multiple dishes, portion size)  
+3. Let you correct or refine the detection (multiple dishes, portion size in grams)  
 4. Generate an AI-based, personalised nutrition explanation
     """
 )
@@ -63,7 +62,7 @@ with st.sidebar:
         value=True,
     )
 
-# Build profile once so we can use it in both normal and low-confidence cases
+# Build profile once so we can use it everywhere
 profile = {
     "goal": goal,
     "activity": activity,
@@ -72,6 +71,9 @@ profile = {
 
 uploaded_image = st.file_uploader("Upload a food image", type=["jpg", "jpeg", "png"])
 
+# =====================================================================
+# MAIN FLOW – only if we have an image
+# =====================================================================
 if uploaded_image is not None:
     img = Image.open(uploaded_image).convert("RGB")
     st.image(img, caption="Uploaded image", use_column_width=True)
@@ -100,28 +102,59 @@ if uploaded_image is not None:
             for c in top_candidates:
                 st.write(f"- {c['dish']} ({c['confidence'] * 100:.1f}%)")
 
-        # Allow the user to manually enter the dish name
-        st.subheader("Manual dish input")
-        manual_name = st.text_input(
-           "If you know the dish name, you can enter it manually:"
+        st.subheader("Manual dish & portion input")
+
+        manual_dish = st.selectbox(
+            "Select the dish you actually see in the image:",
+            options=sorted(NUTRITION_TABLE.keys()),
         )
 
-        # Optional: AI explanation even in low-confidence case
-        if manual_name and use_ai_explanation:
-            with st.spinner("Generating AI explanation based on your input..."):
-                explanation = generate_explanation(
-                    manual_name,
-                    None,          # no reliable nutrition estimate from the model
-                    profile=profile,
-                )
-            st.write(explanation)
-        elif manual_name and not use_ai_explanation:
-            st.info(
-                "AI explanation is disabled (speed/cost optimisation). "
-                "Enable it in the sidebar if you want a personalised analysis."
+        default_grams = float(get_portion_grams(manual_dish))
+        manual_grams = st.number_input(
+            f"Approximate grams of {manual_dish}:",
+            min_value=10.0,
+            max_value=2000.0,
+            value=default_grams,
+            step=10.0,
+        )
+
+        if st.button("Estimate nutrition for manual input"):
+            # Use the same multi-nutrition helper for consistency
+            dish_portions = [{"dish": manual_dish, "grams": manual_grams}]
+            details, total = compute_multi_nutrition(dish_portions)
+
+            st.subheader("Estimated nutritional information")
+
+            d = details[0]
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Calories", f"{d['calories']:.0f} kcal")
+                st.metric("Fat", f"{d['fat']:.1f} g")
+            with col2:
+                st.metric("Carbs", f"{d['carbs']:.1f} g")
+                st.metric("Protein", f"{d['protein']:.1f} g")
+
+            st.write(
+                f"Dish: **{manual_dish}**, "
+                f"Amount: **{d['grams']:.0f} g** (~{d['portions']:.2f} portions)"
             )
 
-        # Stop the rest of the UI flow since we don't trust the prediction
+            st.subheader("AI Nutrition Analysis")
+            if use_ai_explanation:
+                with st.spinner("Generating AI explanation..."):
+                    explanation = generate_explanation(
+                        meal_details=details,
+                        total_nutrition=total,
+                        profile=profile,
+                    )
+                st.write(explanation)
+            else:
+                st.info(
+                    "AI explanation is disabled (speed/cost optimisation). "
+                    "Enable it in the sidebar if you want a personalised analysis."
+                )
+
+        # We handled everything for low-confidence case
         st.stop()
 
     # ---------------------------------------------------------
@@ -160,7 +193,7 @@ if uploaded_image is not None:
         idx = candidate_labels.index(label)
         selected_dishes.append(top_candidates[idx]["dish"])
 
-    # ---- Manual correction of main dish label ----
+    # ---- Main dish correction (optional) ----
     st.subheader("Main dish correction (optional)")
 
     main_dish_default_idx = all_classes.index(dish) if dish in all_classes else 0
@@ -174,75 +207,83 @@ if uploaded_image is not None:
     if not selected_dishes:
         selected_dishes = [corrected_main_dish]
 
-    # ---- Portion-size estimation ----
-    st.subheader("Portion-size estimation")
-
-    portion_factor = st.slider(
-        "Portion factor (relative to one standard portion per dish)",
-        min_value=0.5,
-        max_value=3.0,
-        value=1.0,
-        step=0.1,
-        help="0.5 = half portion, 1.0 = one portion, 2.0 = double portion, etc.",
-    )
-
-    # Combine nutrition across selected dishes * portion_factor
-    combined_nutrition = {"calories": 0.0, "fat": 0.0, "carbs": 0.0, "protein": 0.0}
-
-    for d in selected_dishes:
-        if d not in NUTRITION_TABLE:
-            continue
-        info = NUTRITION_TABLE[d]
-        combined_nutrition["calories"] += info["calories"] * portion_factor
-        combined_nutrition["fat"] += info["fat"] * portion_factor
-        combined_nutrition["carbs"] += info["carbs"] * portion_factor
-        combined_nutrition["protein"] += info["protein"] * portion_factor
+    # ---- Portion-size estimation (per dish, in grams) ----
+    st.subheader("Portion-size estimation (grams per dish)")
 
     st.write(
-        f"Selected dishes: {', '.join(selected_dishes)} "
-        f"(portion factor: x{portion_factor:.1f})"
+        "For each dish you selected, enter an approximate amount in grams. "
+        "Defaults are typical portion sizes."
+    )
+
+    dish_portions = []
+    for d_name in selected_dishes:
+        default_grams = float(get_portion_grams(d_name))
+        grams = st.number_input(
+            f"Approximate grams of {d_name}:",
+            min_value=10.0,
+            max_value=2000.0,
+            value=default_grams,
+            step=10.0,
+            key=f"grams_{d_name}",
+        )
+        dish_portions.append({"dish": d_name, "grams": grams})
+
+    # Compute nutrition for all selected dishes
+    details, total = compute_multi_nutrition(dish_portions)
+
+    # ---- Per-dish nutritional information ----
+    st.subheader("Estimated nutritional information (per dish)")
+
+    for d in details:
+        st.markdown(
+            f"- **{d['dish']}** – {d['grams']:.0f} g "
+            f"(~{d['portions']:.2f} portions): "
+            f"{d['calories']:.0f} kcal, "
+            f"Fat {d['fat']:.1f} g, Carbs {d['carbs']:.1f} g, "
+            f"Protein {d['protein']:.1f} g"
+        )
+
+    # ---- Total nutritional information ----
+    st.subheader("Estimated nutritional information (total meal)")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Calories", f"{total['calories']:.0f} kcal")
+        st.metric("Fat", f"{total['fat']:.1f} g")
+    with col2:
+        st.metric("Carbs", f"{total['carbs']:.1f} g")
+        st.metric("Protein", f"{total['protein']:.1f} g")
+
+    st.write(
+        f"Total amount of food: **{total['grams']:.0f} g** "
+        f"(~{total['portions']:.2f} combined portions)"
     )
 
     # ---- Save user feedback ----
-st.subheader("Was the prediction correct?")
+    st.subheader("Was the prediction correct?")
 
-feedback = st.radio(
-    "Help improve the model:",
-    ["Yes, prediction was correct", "No, the model was wrong"],
-    index=0,
-)
+    feedback = st.radio(
+        "Help improve the model:",
+        ["Yes, prediction was correct", "No, the model was wrong"],
+        index=0,
+    )
 
-if feedback == "No, the model was wrong":
-    st.write("Select the correct dish label:")
-    correct_label = st.selectbox("Correct dish:", options=all_classes)
+    if feedback == "No, the model was wrong":
+        st.write("Select the correct main dish label:")
+        correct_label = st.selectbox("Correct dish:", options=all_classes)
 
-    if st.button("Save feedback"):
-        import os
-        import uuid
+        if st.button("Save feedback image"):
+            import uuid
 
-        feedback_dir = Path("data/user_feedback") / correct_label
-        feedback_dir.mkdir(parents=True, exist_ok=True)
+            feedback_dir = Path("data/user_feedback") / correct_label
+            feedback_dir.mkdir(parents=True, exist_ok=True)
 
-        # Unique filename
-        filename = f"{uuid.uuid4().hex}.jpg"
-        save_path = feedback_dir / filename
+            # Unique filename
+            filename = f"{uuid.uuid4().hex}.jpg"
+            save_path = feedback_dir / filename
 
-        img.save(save_path)
-        st.success(f"Feedback saved! Image stored as {save_path}")
-
-
-    # ---- Nutritional information output ----
-    st.subheader("Estimated nutritional information (total)")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.metric("Calories", f"{combined_nutrition['calories']:.0f} kcal")
-        st.metric("Fat", f"{combined_nutrition['fat']:.1f} g")
-
-    with col2:
-        st.metric("Carbs", f"{combined_nutrition['carbs']:.1f} g")
-        st.metric("Protein", f"{combined_nutrition['protein']:.1f} g")
+            img.save(save_path)
+            st.success(f"Feedback saved! Image stored as {save_path}")
 
     # ---- AI-based personalised explanation ----
     st.subheader("AI Nutrition Analysis")
@@ -250,13 +291,8 @@ if feedback == "No, the model was wrong":
     if use_ai_explanation:
         with st.spinner("Generating AI explanation..."):
             explanation = generate_explanation(
-                corrected_main_dish,
-                {
-                    "calories": combined_nutrition["calories"],
-                    "fat": combined_nutrition["fat"],
-                    "carbs": combined_nutrition["carbs"],
-                    "protein": combined_nutrition["protein"],
-                },
+                meal_details=details,
+                total_nutrition=total,
                 profile=profile,
             )
         st.write(explanation)

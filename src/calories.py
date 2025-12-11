@@ -1,11 +1,15 @@
 # calories.py
 #
-# Approximate nutritional values per typical portion
+# Approximate nutritional values per *typical portion*
 # Units:
 #   - calories: kcal
 #   - fat: grams
 #   - carbs: grams
 #   - protein: grams
+#
+# IMPORTANT:
+#  - Values below are for ONE typical portion.
+#  - We will scale them linearly when the user enters grams or number of portions.
 
 NUTRITION_TABLE = {
     # Azerbaijani dishes
@@ -38,5 +42,95 @@ NUTRITION_TABLE = {
     "tiramisu": {"calories": 450, "fat": 28, "carbs": 45, "protein": 6},
 }
 
-# Quick calories lookup
+# Old simple lookup (per *typical portion*)
 CALORIE_TABLE = {dish: info["calories"] for dish, info in NUTRITION_TABLE.items()}
+
+# -----------------------------
+# Portion-size estimation logic
+# -----------------------------
+
+# Default assumption: 1 portion ≈ 250 g
+DEFAULT_PORTION_GRAMS = 250.0
+
+# For some dishes, portion is usually smaller/larger – override here
+PORTION_GRAMS = {
+    # Very dense / dessert / small pieces
+    "sekerbura": 50.0,
+    "baki_qurabiyesi": 40.0,
+    "paxlava": 70.0,
+    "seki_halvasi": 60.0,
+    "tiramisu": 120.0,
+    "ice_cream": 100.0,
+
+    # Sides / snacks
+    "french_fries": 150.0,
+    "sushi": 200.0,
+
+    # Soups often a bit more
+    "dovga": 300.0,
+    "xash": 300.0,
+}
+
+
+def get_portion_grams(dish_name: str) -> float:
+    """
+    Default grams for ONE typical portion of the dish.
+    If we don't have a special value, fall back to DEFAULT_PORTION_GRAMS.
+    """
+    return PORTION_GRAMS.get(dish_name, DEFAULT_PORTION_GRAMS)
+
+
+def nutrition_for_amount(dish_name: str, grams: float = None, portions: float = 1.0) -> dict:
+    """
+    Calculate nutrition for a given dish and amount.
+
+    You can either:
+      - pass grams (e.g. grams=180), or
+      - pass portions (e.g. portions=0.5, 1, 1.5)
+
+    If grams is provided, portions is ignored and computed automatically.
+
+    Returns dict:
+      {
+        "dish": ...,
+        "grams": ...,
+        "portions": ...,
+        "calories": ...,
+        "fat": ...,
+        "carbs": ...,
+        "protein": ...
+      }
+    """
+    base = NUTRITION_TABLE.get(dish_name)
+    if base is None:
+        return {
+            "dish": dish_name,
+            "grams": grams,
+            "portions": portions,
+            "calories": None,
+            "fat": None,
+            "carbs": None,
+            "protein": None,
+        }
+
+    portion_grams = get_portion_grams(dish_name)
+
+    # If user gave grams – convert to "how many portions?"
+    if grams is not None:
+        factor = grams / portion_grams
+        used_grams = float(grams)
+        used_portions = factor
+    else:
+        factor = float(portions)
+        used_portions = factor
+        used_grams = portion_grams * factor
+
+    return {
+        "dish": dish_name,
+        "grams": used_grams,
+        "portions": used_portions,
+        "calories": base["calories"] * factor,
+        "fat": base["fat"] * factor,
+        "carbs": base["carbs"] * factor,
+        "protein": base["protein"] * factor,
+    }

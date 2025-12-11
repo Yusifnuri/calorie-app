@@ -1,24 +1,25 @@
 # predict.py
 #
 # Predicts the Azerbaijani dish from an image and returns
-# full nutritional information (calories, fat, carbs, protein)
-# based on NUTRITION_TABLE.
+# nutritional information.
 #
 # Extended features:
 # - returns top-k candidate dishes (for multiple-food / correction UI)
 # - returns full class list stored in the checkpoint
+# - helper to compute multi-food nutrition based on grams/portions
 
 from pathlib import Path
-from typing import Union
+from typing import Union, List, Dict, Tuple
 
 import torch
 from torch import nn
 from torchvision import models, transforms
 from PIL import Image
 
-from calories import NUTRITION_TABLE
+from calories import NUTRITION_TABLE, nutrition_for_amount
 
-CONFIDENCE_THRESHOLD = 0.10  # When model less than confident 40% give a response "I dont Know"
+# When model confidence is below this, we say "I don't know"
+CONFIDENCE_THRESHOLD = 0.10
 
 DEVICE = torch.device(
     "mps" if torch.backends.mps.is_available()
@@ -86,14 +87,14 @@ def predict_dish_and_nutrition(
     image: Union[str, Path, Image.Image],
     checkpoint_path: Union[str, Path, None] = None,
     top_k: int = 3,
-):
+) -> Dict:
     """
     Main prediction function.
 
     Returns a dict:
-        - dish: str | None
-        - confidence: float
-        - nutrition: dict | None
+        - dish: str | None                # top-1 prediction
+        - confidence: float               # top-1 probability
+        - nutrition: dict | None          # nutrition for 1 typical portion
         - top_candidates: list of {dish, confidence}
         - all_classes: list of class names
     """
@@ -113,6 +114,7 @@ def predict_dish_and_nutrition(
     # Preprocess image
     input_tensor = preprocess_image(image).to(DEVICE)
 
+    # Forward pass
     with torch.no_grad():
         outputs = model(input_tensor)
         probs = torch.softmax(outputs, dim=1)[0]
@@ -146,23 +148,72 @@ def predict_dish_and_nutrition(
             "all_classes": class_names,
         }
 
-    # Retrieve nutrition info
+    # Retrieve nutrition info for ONE TYPICAL PORTION
     if pred_class not in NUTRITION_TABLE:
         raise KeyError(f"No nutrition info available for predicted dish: {pred_class}")
 
-    nutrition = NUTRITION_TABLE[pred_class]
+    # Use helper from calories.py – 1 typical portion
+    nutrition = nutrition_for_amount(pred_class, portions=1.0)
 
     return {
         "dish": pred_class,
         "confidence": confidence,
-        "nutrition": nutrition,
+        "nutrition": nutrition,          # includes calories, fat, carbs, protein, grams, portions
         "top_candidates": top_candidates,
         "all_classes": class_names,
     }
 
 
+def compute_multi_nutrition(
+    dish_portions: List[Dict[str, float]]
+) -> Tuple[List[Dict], Dict]:
+    """
+    Helper for UI: compute nutrition for multiple dishes.
+
+    dish_portions: list of dicts, each like:
+        {"dish": "plov", "grams": 180}
+      or {"dish": "dolma", "portions": 0.5}
+
+    Returns:
+        details: list of nutrition dicts for each dish
+        total:   dict with total calories / macros / grams / portions
+    """
+    details = []
+    total = {
+        "calories": 0.0,
+        "fat": 0.0,
+        "carbs": 0.0,
+        "protein": 0.0,
+        "grams": 0.0,
+        "portions": 0.0,
+    }
+
+    for dp in dish_portions:
+        dish_name = dp["dish"]
+        grams = dp.get("grams")
+        portions = dp.get("portions", 1.0)
+
+        if grams is not None:
+            n = nutrition_for_amount(dish_name, grams=grams)
+        else:
+            n = nutrition_for_amount(dish_name, portions=portions)
+
+        details.append(n)
+
+        if n["calories"] is not None:
+            total["calories"] += n["calories"]
+            total["fat"] += n["fat"]
+            total["carbs"] += n["carbs"]
+            total["protein"] += n["protein"]
+            total["grams"] += n["grams"]
+            total["portions"] += n["portions"]
+
+    return details, total
+
+
 if __name__ == "__main__":
     import argparse
+    import pprint
 
     parser = argparse.ArgumentParser(
         description="Predict Azerbaijani dish and nutrition from an image."
@@ -181,8 +232,9 @@ if __name__ == "__main__":
     print("Image:", image_path)
     print(f"Predicted dish: {dish}")
     print(f"Confidence: {conf*100:.2f}%")
-    print("Nutrition (per portion):")
-    print(f"  Calories: {nut['calories']} kcal")
-    print(f"  Fat:      {nut['fat']} g")
-    print(f"  Carbs:    {nut['carbs']} g")
-    print(f"  Protein:  {nut['protein']} g")
+
+    if nut is not None:
+        print("Nutrition for ~1 typical portion:")
+        pprint.pprint(nut)
+    else:
+        print("Model is not confident enough or no nutrition info available.")
